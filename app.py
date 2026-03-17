@@ -8,7 +8,7 @@ import pandas as pd
 import streamlit as st
 
 
-st.set_page_config(page_title="Excel File Splitter", page_icon="📄", layout="centered")
+st.set_page_config(page_title="Excel / CSV File Splitter", page_icon="📄", layout="centered")
 
 
 def safe_name(name: str) -> str:
@@ -16,6 +16,19 @@ def safe_name(name: str) -> str:
     name = re.sub(r'[\\/*?:"<>|]+', "_", name)
     name = re.sub(r"\s+", "_", name)
     return name[:100] if name else "output"
+
+
+def get_file_ext(filename: str) -> str:
+    return os.path.splitext(filename)[1].lower()
+
+
+def get_excel_engine(filename: str):
+    ext = get_file_ext(filename)
+    if ext in [".xlsx", ".xlsm"]:
+        return "openpyxl"
+    if ext == ".xls":
+        return "xlrd"
+    return None
 
 
 def split_dataframe(df: pd.DataFrame, mode: str, value: int):
@@ -44,7 +57,7 @@ def split_dataframe(df: pd.DataFrame, mode: str, value: int):
     return chunks
 
 
-def build_zip(chunks, output_format: str, base_name: str, sheet_name: str) -> BytesIO:
+def build_zip(chunks, output_format: str, base_name: str, sheet_name: str = "Sheet1") -> BytesIO:
     zip_buffer = BytesIO()
 
     with zipfile.ZipFile(zip_buffer, "w", zipfile.ZIP_DEFLATED) as zip_file:
@@ -57,49 +70,92 @@ def build_zip(chunks, output_format: str, base_name: str, sheet_name: str) -> By
                     chunk.to_excel(
                         writer,
                         index=False,
-                        sheet_name=sheet_name[:31] if sheet_name else "Sheet1",
+                        sheet_name=(sheet_name[:31] if sheet_name else "Sheet1"),
                     )
                 temp_buffer.seek(0)
                 zip_file.writestr(f"{file_base}.xlsx", temp_buffer.read())
 
-            else:
+            elif output_format == "csv":
                 csv_data = chunk.to_csv(index=False)
                 zip_file.writestr(f"{file_base}.csv", csv_data)
+
+            else:
+                raise ValueError("Unsupported output format")
 
     zip_buffer.seek(0)
     return zip_buffer
 
 
-st.title("Excel File Splitter")
-st.write(
-    "Upload an Excel file and split it into multiple files while keeping the header row in each file."
-)
+def read_uploaded_file(uploaded_file):
+    ext = get_file_ext(uploaded_file.name)
 
-uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx", "xls"])
+    if ext in [".xlsx", ".xls", ".xlsm"]:
+        engine = get_excel_engine(uploaded_file.name)
+
+        try:
+            excel_file = pd.ExcelFile(uploaded_file, engine=engine)
+        except ImportError:
+            if engine == "openpyxl":
+                st.error("Missing dependency: openpyxl. Add openpyxl to requirements.txt and redeploy.")
+            elif engine == "xlrd":
+                st.error("Missing dependency: xlrd. Add xlrd to requirements.txt and redeploy.")
+            else:
+                st.error("Required Excel dependency is missing.")
+            st.stop()
+
+        if not excel_file.sheet_names:
+            st.error("No sheets found in the uploaded Excel file.")
+            st.stop()
+
+        selected_sheet = st.selectbox("Select sheet", excel_file.sheet_names)
+
+        df = pd.read_excel(uploaded_file, sheet_name=selected_sheet, engine=engine)
+        return df, selected_sheet, ext
+
+    elif ext == ".csv":
+        try:
+            df = pd.read_csv(uploaded_file)
+            return df, None, ext
+        except UnicodeDecodeError:
+            uploaded_file.seek(0)
+            try:
+                df = pd.read_csv(uploaded_file, encoding="latin1")
+                return df, None, ext
+            except Exception as e:
+                st.error(f"Could not read CSV file: {e}")
+                st.stop()
+        except Exception as e:
+            st.error(f"Could not read CSV file: {e}")
+            st.stop()
+
+    else:
+        st.error("Unsupported file type. Please upload .xlsx, .xls, .xlsm, or .csv")
+        st.stop()
+
+
+st.title("Excel / CSV File Splitter")
+st.write("Upload an Excel or CSV file and split it into multiple files while keeping the header row in each file.")
+
+uploaded_file = st.file_uploader("Upload file", type=["xlsx", "xls", "xlsm", "csv"])
 
 if uploaded_file is not None:
     try:
         file_size_mb = uploaded_file.size / (1024 * 1024)
         st.info(f"Uploaded file size: {file_size_mb:.2f} MB")
 
-        excel_file = pd.ExcelFile(uploaded_file)
-        sheet_names = excel_file.sheet_names
+        df, selected_sheet, source_ext = read_uploaded_file(uploaded_file)
 
-        if not sheet_names:
-            st.error("No sheets found in the uploaded Excel file.")
-            st.stop()
+        if source_ext == ".csv":
+            st.success("Loaded CSV file successfully")
+        else:
+            st.success(f"Loaded sheet '{selected_sheet}' successfully")
 
-        selected_sheet = st.selectbox("Select sheet", sheet_names)
-
-        df = pd.read_excel(uploaded_file, sheet_name=selected_sheet)
-
-        st.success(f"Loaded sheet '{selected_sheet}' successfully.")
         st.write(f"Total rows: **{len(df)}**")
         st.write(f"Total columns: **{len(df.columns)}**")
 
         split_option = st.radio(
             "Choose split method",
-            ["Number of files", "Rows per file"],
+            ["Number of files", "Rows per file"]
         )
 
         if split_option == "Number of files":
@@ -107,7 +163,7 @@ if uploaded_file is not None:
                 "Enter number of files",
                 min_value=1,
                 value=2,
-                step=1,
+                step=1
             )
             mode = "files"
         else:
@@ -115,7 +171,7 @@ if uploaded_file is not None:
                 "Enter rows per file",
                 min_value=1,
                 value=1000,
-                step=1,
+                step=1
             )
             mode = "rows"
 
@@ -123,14 +179,14 @@ if uploaded_file is not None:
 
         file_prefix = st.text_input(
             "Output file prefix",
-            value=safe_name(os.path.splitext(uploaded_file.name)[0]),
+            value=safe_name(os.path.splitext(uploaded_file.name)[0])
         )
 
         show_preview = st.checkbox("Show preview")
         if show_preview:
             st.dataframe(df.head(20), use_container_width=True)
 
-        if st.button("Split File"):
+        if st.button("Split File", type="primary"):
             with st.spinner("Splitting file..."):
                 chunks = split_dataframe(df, mode, int(split_value))
 
@@ -141,17 +197,17 @@ if uploaded_file is not None:
                         chunks=chunks,
                         output_format=output_format,
                         base_name=safe_name(file_prefix),
-                        sheet_name=selected_sheet,
+                        sheet_name=selected_sheet if selected_sheet else "Sheet1"
                     )
 
-                    st.success(f"Successfully split into {len(chunks)} files.")
+                    st.success(f"Successfully split into {len(chunks)} files")
 
                     st.download_button(
                         label="Download ZIP",
                         data=zip_buffer,
                         file_name=f"{safe_name(file_prefix)}_split.zip",
-                        mime="application/zip",
+                        mime="application/zip"
                     )
 
     except Exception as e:
-        st.error(f"Error processing file: {e}")
+        st.error(f"Error processing file: {str(e)}")
